@@ -32,7 +32,7 @@
 /*read and write a word at address p*/
 #define GET(p) (*(unsigned int *)(p))
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
-
+ 
 /*read the size and allocated fields from address p, p is the header or footer*/
 #define GET_SIZE(p) (GET(p) & ~0x7)
 #define GET_ALLOC(p) (GET(p) & 0x1)
@@ -43,8 +43,8 @@
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 /*compute the address of nexr and previous block*/
-#define NEXT_BLKP(bp) ((char *)(bp) + GETSIZE(((char *)(bp) - WSIZE)))
-#define PREV_BLKP(bp) ((char *)(bp) - GETSIZE(((char *)(bp) - DSIZE)))
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /*Get and put the pre and next block in the list*/
 #define GET_PRE(p) (GET(p))
@@ -84,7 +84,21 @@ team_t team = {
 
 
 static char *heap_listp;
-static char *starter = 0;
+static unsigned int *starter = 0;
+
+static void *extend_heap(size_t words);
+int mm_init(void);
+static void *find_fit(size_t asize);
+void realloc_place(void *bp, int asize);
+static void *try_coalesce(void *bp, int asize, int *flag);
+void add_to_list(void *ptr);
+void erase_from_list(void *ptr);
+static void *coalesce(void *bp);
+void place(void *bp, size_t asize);
+void *mm_malloc(size_t size);
+void mm_free(void *ptr);
+void *mm_realloc(void *ptr, size_t size);
+
 
 static void *extend_heap(size_t words){
     char *bp;
@@ -104,18 +118,160 @@ static void *extend_heap(size_t words){
 
 int mm_init(void)
 {
-    if((heap_listp=mem_sbrk(6*WSIZE)) == (void*) - 1) return -1;
-    starter = mem_heap_lo() + 1; //The starter took two words of the initial heap, which are pre and next
+    mem_init();
+    if((heap_listp=(char*)mem_sbrk(6*WSIZE)) == (char*) - 1) return -1;
+    starter = (unsigned int *)mem_heap_lo() + 1; //The starter took two words of the initial heap, which are pre and next
     PUT(heap_listp, 0);
-    PUT(heap_listp + 3*WSIZE, PACK(DSIZE, 0)); //Prologue header
-    PUT(heap_listp + 4*WSIZE, PACK(DSIZE, 0));  //Prologue footer
+    PUT(heap_listp + 3*WSIZE, PACK(DSIZE, 1)); //Prologue header
+    PUT(heap_listp + 4*WSIZE, PACK(DSIZE, 1));  //Prologue footer
     PUT(heap_listp + 5*WSIZE, PACK(0, 1)); //Epilogue header
     PUT_PRE(starter, 0);
     PUT_NEXT(starter, 0);
 
+    heap_listp += 4 * WSIZE;
+
     /*extent an initial chunk*/
     if(extend_heap(CHUNKSIZE / WSIZE) == NULL) return -1;
     return 0;
+}
+
+
+static void *find_fit(size_t asize){
+    unsigned int bp = 0;
+    for(bp = GET_NEXT(starter); bp; bp = GET_NEXT(bp)){
+    //    printf("%d\n", bp);
+        if(GET_SIZE(HDRP(bp)) > asize)
+          return (void*)bp;
+    }
+    return NULL;
+}
+
+
+void realloc_place(void *bp, int asize){
+    size_t csize = GET_SIZE(HDRP(bp));
+    if(csize - asize >= 2 * DSIZE){
+        csize -= asize;
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize, 0));
+        PUT(FTRP(bp), PACK(csize, 0));
+        coalesce(bp);
+    }else{
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
+}
+
+static void *try_coalesce(void *bp, int asize, int *flag){
+    void *pre = PREV_BLKP(bp), *nxt = NEXT_BLKP(bp);
+    size_t prev_alloc = GET_ALLOC(FTRP(pre));
+    size_t next_alloc = GET_ALLOC(HDRP(nxt));
+    size_t size = GET_SIZE(HDRP(bp));
+
+    if(prev_alloc && next_alloc) return bp;
+
+    else if(prev_alloc && !next_alloc){
+        size += GET_SIZE(HDRP(nxt));
+        if(size >= asize){
+            PUT(HDRP(bp), PACK(size, 0));
+            PUT(FTRP(nxt), PACK(size, 0));
+            erase_from_list(nxt);
+            *flag = 1;
+        }
+    }
+    else if(!prev_alloc && next_alloc){
+        size += GET_SIZE(FTRP(pre));
+        if(size >= asize){
+            PUT(HDRP(pre), PACK(size, 0));
+            PUT(FTRP(bp), PACK(size, 0));
+            erase_from_list(pre);
+            bp = pre;
+        }
+    }
+    else{
+        size += GET_SIZE(FTRP(pre)) + GET_SIZE(HDRP(nxt));
+        if(size > asize){
+            PUT(HDRP(pre), PACK(size, 0));
+            PUT(FTRP(nxt), PACK(size, 0));
+            erase_from_list(pre);
+            erase_from_list(nxt);
+            bp = pre;
+        }
+    }
+    return bp;
+}
+
+void add_to_list(void *ptr){
+    unsigned int starter_next = GET_NEXT(starter);
+    PUT_NEXT(starter, ptr);
+    PUT_PRE(ptr, starter);
+    PUT_NEXT(ptr, starter_next);
+    if(starter_next) PUT_PRE(starter_next, ptr);
+}
+
+
+void erase_from_list(void *ptr){
+    unsigned int pre, nxt;
+    pre = GET_PRE(ptr);
+    nxt = GET_NEXT(ptr);
+    if(nxt) PUT_PRE(nxt, pre);
+    PUT_NEXT(pre, nxt);
+}
+
+static void *coalesce(void *bp){
+    void *pre = PREV_BLKP(bp), *nxt = NEXT_BLKP(bp);
+    size_t prev_alloc = GET_ALLOC(FTRP(pre));
+    size_t next_alloc = GET_ALLOC(HDRP(nxt));
+    size_t size = GET_SIZE(HDRP(bp));
+
+    if(prev_alloc && next_alloc){
+        add_to_list(bp);
+        return bp;
+    }
+    else if(prev_alloc && !next_alloc){
+        size += GET_SIZE(HDRP(nxt));
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(nxt), PACK(size, 0));
+        erase_from_list(nxt);
+        add_to_list(bp);
+    }
+    else if(!prev_alloc && next_alloc){
+        size += GET_SIZE(FTRP(pre));
+        PUT(HDRP(pre), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size, 0));
+        erase_from_list(pre);
+        add_to_list(pre);
+        bp = pre;
+    }
+    else{
+        size += GET_SIZE(FTRP(pre)) + GET_SIZE(HDRP(nxt));
+        PUT(HDRP(pre), PACK(size, 0));
+        PUT(FTRP(nxt), PACK(size, 0));
+        erase_from_list(pre);
+        erase_from_list(nxt);
+        add_to_list(pre);
+        bp = pre;
+    }
+    return bp;
+}
+
+
+void place(void *bp, size_t asize){
+    size_t csize = GET_SIZE(HDRP(bp));
+    erase_from_list(bp);
+    if((csize - asize) >= 2 * DSIZE){
+        csize -= asize;
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize, 0));
+        PUT(FTRP(bp), PACK(csize, 0));
+        coalesce(bp);
+    }else{
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
 }
 
 /* 
@@ -126,28 +282,32 @@ void *mm_malloc(size_t size)
 {
     size_t asize;
     size_t extend_size;
-    char *bp;
+    void *bp;
 
     if(size == 0) return NULL;
     if(size < DSIZE) asize = 2 * DSIZE;
     else asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE); //DSIZE-1是向上舍入
 
-    if(bp = find_fit(asize) != NULL){
+    if((bp = find_fit(asize)) != NULL){
         place(bp, asize);
         return bp;
     }
     extend_size = MAX(CHUNKSIZE, asize);
     if((bp=extend_heap(extend_size/WSIZE)) == NULL) return NULL;
     place(bp, asize);
-    return 0;
+    return bp;
 }
+
 /*
  * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr){
-    size_t size = GET_SIZE(ptr);
 
-    PUT(HTRP(ptr), PACK(size, 0));
+    if(ptr == 0) return ;
+
+    size_t size = GET_SIZE(HDRP(ptr));
+
+    PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
 
     coalesce(ptr);
@@ -168,160 +328,27 @@ void *mm_realloc(void *ptr, size_t size)
     if(size < DSIZE) asize = 2 * DSIZE;
     else asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE);
 
-    int old_size = GET_SIZE(ptr);
-    if(size > old_size){
-        void *new_ptr; int flag;
+    int old_size = GET_SIZE(HDRP(ptr));
+    if(asize > old_size){
+        void *new_ptr; int flag = 0;
         new_ptr = try_coalesce(ptr, size, &flag);
         if(flag){
             realloc_place(new_ptr, asize);
             return new_ptr;
         }
         else if(new_ptr != ptr){
-            memcpy(new_ptr, ptr, old_size);
+            memcpy(new_ptr, ptr, old_size - DSIZE);
             realloc_place(new_ptr, asize);
             return new_ptr;
         }
         else{
             new_ptr = mm_malloc(asize);
-            memcpy(new_ptr, ptr, old_size);
+            memcpy(new_ptr, ptr, old_size - DSIZE);
             mm_free(ptr);
             return new_ptr;
         }
     }else{
         realloc_place(ptr, asize);
         return ptr;
-    }
-}
-
-void realloc_place(void *bp, int asize){
-    size_t csize = GET_SIZE(bp);
-    if(csize - asize >= 2 * DSIZE){
-        csize -= asize;
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize, 0));
-        PUT(FTRP(bp), PACK(csize, 0));
-        coalesce(bp);
-    }else{
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
-    }
-}
-
-void *try_coalesce(void *bp, int asize, int *flag){
-    void *pre = PREV_BLKP(bp), *nxt = NEXT_BLKP(bp);
-    size_t prev_alloc = GET_ALLOC(FTRP(pre));
-    size_t next_alloc = GET_ALLOC(HDRP(nxt));
-    size_t size = GET_SIZE(HDRP(bp));
-
-    if(prev_alloc && !next_alloc){
-        size += GET_SIZE(HDRP(nxt));
-        if(size > asize){
-            PUT(HDRP(bp), PACK(size, 0));
-            PUT(FTRP(nxt), PACK(size, 0));
-            erase_from_list(nxt);
-            *flag = 1;
-        }
-    }
-    else if(!prev_alloc && next_alloc){
-        size += GET_SIZE(FTRP(pre));
-        if(size > asize){
-            PUT(HDRP(pre), PACK(size, 0));
-            PUT(FTRP(bp), PACK(size, 0));
-            erase_from_list(bp);
-            bp = pre;
-        }
-    }
-    else{
-        size += GET_SIZE(pre) + GET_SIZE(nxt);
-        if(size > asize){
-            PUT(HDRP(pre), PACK(size, 0));
-            PUT(FTRP(nxt), PACK(size, 0));
-            erase_from_list(bp);
-            erase_from_list(nxt);
-            bp = pre;
-        }
-    }
-    return bp;
-}
-
-void add_to_list(void *ptr){
-    void *starter_next = GET_NEXT(starter);
-    PUT_NEXT(starter, ptr);
-    PUT_PRE(ptr, starter);
-    PUT_NEXT(ptr, starter_next);
-    if(starter_next) PUT_PRE(starter_next, ptr);
-}
-
-
-void erase_from_list(void *ptr){
-    void *pre, *nxt;
-    pre = GET_PRE(ptr);
-    nxt = GET_NEXT(ptr);
-    if(nxt) PUT_PRE(nxt, pre);
-    PUT_NEXT(pre, nxt);
-}
-
-static void *coalesce(void *bp){
-    void *pre = PREV_BLKP(bp), *nxt = NEXT_BLKP(bp);
-    size_t prev_alloc = GET_ALLOC(FTRP(pre));
-    size_t next_alloc = GET_ALLOC(HDRP(nxt));
-    size_t size = GET_SIZE(HDRP(bp));
-
-    if(prev_alloc && next_alloc){
-        add_to_list(bp);
-        return bp;
-    }
-    else if(prev_alloc && !next_alloc){
-        size += GET_SIZE(HTRP(nxt));
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(nxt), PACK(size, 0));
-        erase_from_list(nxt);
-        add_to_list(bp);
-    }
-    else if(!prev_alloc && next_alloc){
-        size += GET_SIZE(FTRP(pre));
-        PUT(HDRP(pre), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0));
-        erase_from_list(pre);
-        add_to_list(pre);
-        bp = pre;
-    }
-    else{
-        size += GETSIZE(FTRP(pre)) + GETSIZE(HDRP(nxt));
-        PUT(HDRP(pre), PACK(size, 0));
-        PUT(FTRP(nxt), PACK(size, 0));
-        erase_from_list(pre);
-        erase_from_list(nxt);
-        add_to_list(pre);
-        bp = pre;
-    }
-    return bp;
-}
-
-
-static void *find_fit(size_t asize){
-    int *ptr;
-    for(ptr = starter; ptr; ptr = GET_NEXT(ptr)){
-        if(GET_SIZE(ptr) > asize)
-          return ptr;
-    }
-}
-
-void place(void *bp, size_t asize){
-    size_t csize = GET_SIZE(bp);
-    erase_from_list(bp);
-    if((csize - asize) >= 2 * DSIZE){
-        csize -= asize;
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize, 0));
-        PUT(FTRP(bp), PACK(csize, 0));
-        coalesce(bp);
-    }else{
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
     }
 }
