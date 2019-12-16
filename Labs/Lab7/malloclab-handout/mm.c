@@ -1,13 +1,14 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
+ * mm.c - A malloc package based on Explicit free list and optimized realloc.
  * 
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * In this approach, a block has its header, footer and content.
+ * The header is the same as footer, and it records the size and alloc.
+ * The word size is 4, and the block size is aligned to 8
+ * Through the header, we can compute the next or the previous physical block's address, 
+ * and coalesce them if they are free.
+ * The malloc package use the explicit free list to maintain the free block, and use LIFO
+ * to organize them. Every new free block will be inserted to the head of the list.
+ * The realloc will try to put the new words into original positions, to reduce the fragment.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,6 +164,10 @@ void realloc_place(void *bp, int asize){
     }
 }
 
+
+/*An optimized coalesce for realloc. If the realloc address has a free adjacent block
+* then try to coalesce it to the realloc's block.
+*/
 static void *try_coalesce(void *bp, int asize, int *flag){
     void *pre = PREV_BLKP(bp), *nxt = NEXT_BLKP(bp);
     size_t prev_alloc = GET_ALLOC(FTRP(pre));
