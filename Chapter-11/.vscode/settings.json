@@ -1,3 +1,40 @@
 {
-    "cquery.cacheDirectory": "${workspaceFolder}/.vscode/cquery_cached_index/"
+    "haskell.ghcMod.executablePath": "C:/Users/Administrator/appData/Roaming/local/bin/ghc-mod",
+    "haskell.hlint.executablePath": "C:/Users/Administrator/appData/Roaming/local/bin/hlint",
+    "editor.fontSize": 18,
+    "backgroung.enable":true,
+    "background.useDefault":false,
+    "background.customImages":[            "file:///F:/图片/Bigjpg/vsc-back-ground.png"        ],
+    "background.style":{
+        "content":"''",
+        "pointer-events":"none",
+        "position":"absolute",
+        "top":"0",
+        "right":"0",
+        "width":"100%",
+        "height":"100%",
+        "z-index":"99999",
+        "background.repeat":"no-repeat",
+        "background-size":"100%,100%",
+        "opacity":0.1
+    },
+    "code-runner.runInTerminal": true,
+    "editor.suggestSelection": "first",
+    "vsintellicode.modify.editor.suggestSelection": "automaticallyOverrodeDefaultValue",
+    "files.exclude": {
+        "**/.classpath": true,
+        "**/.project": true,
+        "**/.settings": true,
+        "**/.factorypath": true
+    },
+    "java.errors.incompleteClasspath.severity": "ignore",
+    "extensions.ignoreRecommendations": true,
+    "cquery.launch.workingDirectory": " /root/cquery/build",
+    "cquery.launch.command": "release/bin/cquery",
+    "workbench.colorTheme": "Sublime Material Theme - Dark",
+
+    "code-runner.executorMap": {
+        "c": "cd $dir && gcc $fileName -lpthread -g -o $fileNameWithoutExt && ./$fileNameWithoutExt",
+    },
+    "workbench.iconTheme": "material-icon-theme"
 }
