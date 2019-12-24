@@ -10,12 +10,30 @@ static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64;
 static const char *conn_hdr = "Connection: close\r\n";
 static const char *proxy_conn_hdr = "Proxy-Connection: close\r\n";
 
+typedef struct WOBJ{
+    char content[MAX_OBJECT_SIZE];
+    char url[MAXLINE];
+    struct WOBJ *next;
+    int empty;
+} web_obj;
+
+typedef struct {
+    web_obj *head, *tail;
+    sem_t mutex, w;
+    int read_cnt;
+    int siz;
+} Cache;
+
+Cache cache;
 
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *host, char *path, char *port);
 void build_request_header(char *host, char *path, char *port, rio_t *rio, char *header);
 void *thread(void *vargp);
+void init_cache();
+web_obj *Reader(char *url);
+void Writer(web_obj *new_obj);
 
 int main(int argc, char const *argv[])
 {
@@ -34,6 +52,8 @@ int main(int argc, char const *argv[])
     strcpy(port, argv[1]);
 
     listenfd = Open_listenfd(port);
+    init_cache();
+
     while(1){
         clientlen = sizeof(clientaddr);
         connfd = Malloc(sizeof(int));
@@ -72,6 +92,7 @@ void doit(int fd){
     
     build_request_header(host, path, port, &rio, header);
 
+/*
     clientfd = Open_clientfd(host, port);
     Rio_readinitb(&sio, clientfd);
     Rio_writen(clientfd, header, strlen(header));
@@ -84,6 +105,48 @@ void doit(int fd){
     }
 
     close(clientfd);
+*/
+    char *url;
+    url = Malloc(sizeof(host) + sizeof(path));
+    strcpy(url, host);
+    strcat(url, path);
+
+    web_obj *page; 
+    page = Reader(url);
+    free(url);
+
+    if(page -> empty){
+        clientfd = Open_clientfd(host, port);
+        Rio_readinitb(&sio, clientfd);
+        Rio_writen(clientfd, header, strlen(header));
+
+        size_t n, totalsize = 0;
+        int already_removed = 0;
+
+        while((n = Rio_readlineb(&sio, buf, MAXLINE)) != 0) {
+            totalsize += n;
+
+	        printf("Proxy server received %d bytes\n", (int)n);
+	        Rio_writen(fd, buf, n);
+            
+            if(totalsize <= MAX_OBJECT_SIZE){
+                strcat(page -> content, buf);
+                page -> empty = 0;
+            }
+            else if(!already_removed){
+                memset(page -> content, 0, sizeof(page -> content));
+                memset(page -> url, 0, sizeof(page -> url));
+                page -> empty = 1;
+                already_removed = 1;
+            }
+        }
+        Writer(page);
+        close(clientfd);
+    }
+
+    else{
+        Rio_writen(fd, page -> content, strlen(page -> content));
+    }
 }
 
 void read_requesthdrs(rio_t *rp){
@@ -157,4 +220,72 @@ void *thread(void *vargp){
     doit(connfd);
     Close(connfd);
     return NULL;
+}
+
+void init_cache(){
+    cache.head = cache.tail = NULL;
+    cache.siz = 0;
+    Sem_init(&cache.mutex, 0, 1);
+    Sem_init(&cache.w, 0, 1);
+    cache.read_cnt = 0;
+}
+
+web_obj *Reader(char *url){
+    P(&cache.mutex);
+    cache.read_cnt++;
+    if(cache.read_cnt == 1) P(&cache.w);
+    V(&cache.mutex);
+
+    web_obj *p;
+    web_obj *found = NULL;
+
+    for(p = cache.head; p; p = p -> next){
+        if(!strcmp(p -> url, url) || p -> empty){
+        //    Writer(p);
+            found = p;
+            break;
+        }
+    }
+
+    /*create a new web object*/
+    if(!found){
+        web_obj *new_obj;
+        new_obj = malloc(sizeof(web_obj));
+        strcpy(new_obj -> url, url);
+        new_obj -> empty = 1;
+    //    Writer(new_obj);
+        found = new_obj;
+    }
+    
+    P(&cache.mutex);
+    cache.read_cnt--;
+    if(cache.read_cnt == 0) V(&cache.w);
+    V(&cache.mutex);
+
+    return found;
+}
+
+void Writer(web_obj *new_obj){
+    P(&cache.w);
+
+    cache.siz++;
+    
+    /*Remove head object*/
+    if(cache.siz > 10){
+        web_obj *new_head = cache.head -> next;
+        free(cache.head);
+        cache.head = new_head;
+        cache.siz--;
+    }
+
+    if(cache.siz == 1){
+        cache.head = new_obj;
+        cache.tail = new_obj;
+    }else{
+         cache.tail -> next = new_obj;
+        cache.tail = new_obj;
+    }
+
+    V(&cache.w);
+    return ;
 }
